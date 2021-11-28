@@ -4,7 +4,7 @@ setup(
     name='kluppspy',
     version='0.1.0',    
     description='A Package of useful Computer Vision constructs and functions',
-#     url='https://github.com/shuds13/pyexample',
+    url='https://github.com//klupp/kluppspy',
     author='Aleksandar Kuzmanoski',
     author_email='aleksandar.kuzmanoski@rwth-aachen.de',
     license='BSD 2-clause',
