@@ -1,0 +1,7 @@
+.idea
+.ipynb_checkpoints
+.eggs
+build
+dist
+kluppspy.egg-info
+venv/
