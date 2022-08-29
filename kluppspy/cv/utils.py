@@ -1,13 +1,31 @@
 import glob
 import os
+from tqdm import tqdm
 
+import math
 import numpy as np
+from scipy.spatial import distance
 import cv2
+from matplotlib import pyplot as plt
 import matplotlib.colors as colors
 import matplotlib.cm as cm
 from kluppspy.cv import image
 
+
 ######################## UTILS
+
+
+def to_rect(left, top, right, bottom):
+    """
+    Find the four edge points of a rectangle from boundaries.
+    """
+    return np.array([
+        [[left, top]],
+        [[right, top]],
+        [[right, bottom]],
+        [[left, bottom]]
+    ])
+
 
 def empty_kernel():
     vect = np.array([0, 1, 0])
@@ -29,6 +47,30 @@ def gauss(x, sigma=1, mu=0):
 
 def gaussdx(x, sigma=1, mu=0):
     return -((x - mu) / (np.sqrt(2 * np.pi) * sigma ** 3)) * np.exp(-(x - mu) ** 2 / (2 * sigma ** 2))
+
+
+def order_four_points(pts):
+    """
+    Order the points in the following order (top_left, top_right, bottom_right, bottom_left)
+
+    :pts: coordinates for four points.
+    """
+    rect = np.zeros((4, 2), dtype="float32")
+
+    # the top-left point has lowest sum
+    # the bottom-right has highest sum
+    s = pts.sum(axis=1)
+    rect[0] = pts[np.argmin(s)]
+    rect[2] = pts[np.argmax(s)]
+
+    # now, compute the difference between the points
+    # top-right point will have the smallest difference (negative number)
+    # bottol-left will have the largest difference
+    diff = np.diff(pts, axis=1)
+    rect[1] = pts[np.argmin(diff)]
+    rect[3] = pts[np.argmax(diff)]
+
+    return rect
 
 
 ######################## IM UTILS
@@ -61,12 +103,21 @@ def calc_mask(gray_mask):
     return mask
 
 
-def scale_im(img, scale=1):
-    if scale == 1:
-        return img
-    width = int(img.shape[1] * scale)
-    height = int(img.shape[0] * scale)
-    dim = (width, height)
+def scale_im(img, scale=None, height=None, width=None):
+    h = None
+    w = None
+    if scale is not None:
+        h = int(img.shape[0] * scale)
+        w = int(img.shape[1] * scale)
+    if height is not None:
+        h = height
+        scale = h / img.shape[0]
+        w = int(img.shape[1] * scale)
+    if width is not None:
+        w = width
+        scale = w / img.shape[1]
+        h = int(img.shape[0] * scale)
+    dim = (w, h)
     # resize image
     resized = cv2.resize(img, dim, interpolation=cv2.INTER_AREA)
     return resized
@@ -128,6 +179,47 @@ def plot_image_surface(im, ax, perserve_ratio=True):
     ax.plot_surface(x_pos, y_pos, im, cmap='autumn', alpha=0.8)
 
 
+def four_point_transform(image, pts):
+    """
+    Transform the polygon of 4 points to project it on the screen as a new image.
+
+
+    :image: an open cv image
+    :pts: list of 4 points in 2D
+    """
+    # obtain a consistent order of the points and unpack them
+    # individually
+    rect = order_four_points(pts)
+    (tl, tr, br, bl) = rect
+    # compute the width of the new image, which will be the
+    # maximum distance between bottom-right and bottom-left
+    # x-coordinates or the top-right and top-left x-coordinates
+    widthA = distance.euclidean(br, bl)
+    widthB = distance.euclidean(tr, tl)
+    maxWidth = max(int(widthA), int(widthB))
+    # compute the height of the new image, which will be the
+    # maximum distance between the top-right and bottom-right
+    # y-coordinates or the top-left and bottom-left y-coordinates
+    heightA = distance.euclidean(tr, br)
+    heightB = distance.euclidean(tl, bl)
+    maxHeight = max(int(heightA), int(heightB))
+    # now that we have the dimensions of the new image, construct
+    # the set of destination points to obtain a "birds eye view",
+    # (i.e. top-down view) of the image, again specifying points
+    # in the top-left, top-right, bottom-right, and bottom-left
+    # order
+    dst = np.array([
+        [0, 0],
+        [maxWidth - 1, 0],
+        [maxWidth - 1, maxHeight - 1],
+        [0, maxHeight - 1]], dtype="float32")
+    # compute the perspective transform matrix and then apply it
+    M = cv2.getPerspectiveTransform(rect, dst)
+    warped = cv2.warpPerspective(image, M, (maxWidth, maxHeight))
+    # return the warped image
+    return warped
+
+
 ######################## Filters
 
 
@@ -161,7 +253,7 @@ class Thresholding:
     def get_trheshold_isodata(self):
         intensity_sup = np.max(self.im)
 
-        param_im_histogram = cvu.Histogram(self.im)
+        param_im_histogram = Histogram(self.im)
         intensities, param_im_hist = param_im_histogram.get_hist()
 
         intensities, param_im_hist = intensities[:intensity_sup + 1], param_im_hist[:intensity_sup + 1]
@@ -269,7 +361,7 @@ class Histogram:
     def equalize(self, target_im=None):
         if target_im is None:
             target_im = self.im
-        #         target_im = cvu.norm(im).astype(np.uint8)
+        #         target_im = norm(im).astype(np.uint8)
         return self.get_equalization_map()[target_im]
 
 
@@ -320,6 +412,41 @@ def gauss_smooth_filter(im, sigma):
     ii = cv2.filter2D(tmp, -1, gaussian.T)
 
     return ii
+
+
+def find_edges(im):
+    """
+    Find Edges for given BGR image
+    """
+    # Make the image gray (in this case the colors are not really important
+    # because the screen usually is quite distinctive by brightness only)
+    im_gray = cv2.cvtColor(im, cv2.COLOR_BGR2GRAY)
+    # Blur the image in order to make handle very thin edges
+    blur_im = cv2.bilateralFilter(im_gray, 11, 17, 200, borderType=cv2.BORDER_REPLICATE)
+    im_edges = cv2.Canny(blur_im, 30, 200)
+    return im_edges
+
+
+def find_sqare(im):
+    def approximateContour(cnt):
+        peri = cv2.arcLength(cnt, True)
+        return np.array(cv2.approxPolyDP(cnt, 0.01 * peri, True))
+
+    im_edges = find_edges(im)
+    cnts, _ = cv2.findContours(im_edges.copy(), cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    cnts = [cv2.convexHull(cnt, False) for cnt in cnts]
+    cnts = sorted(cnts, key=cv2.contourArea, reverse=True)
+    cnts = [approximateContour(cnt) for cnt in cnts]
+
+    screenCnt = None
+    for cnt in cnts:
+        # if our approximated contour has four points, then
+        # we can assume that we have found our screen
+        if len(cnt) == 4:
+            screenCnt = cnt
+            break
+
+    return screenCnt, cnts
 
 
 ######################## IO
@@ -424,5 +551,29 @@ def dir_stream(folder, wait_key=30, scale=1):
     return Container()
 
 
-def dir_images(path):
+def dir_image_paths(path):
     return [im_name for im_name in glob.glob(path + "*.jpg")]
+
+
+######## Tests
+def image_test(im_read, process, path, row_num=6):
+    ims = list(im_read(path))
+    print("Process Images")
+    ims = [process(im) for im in tqdm(ims)]
+    show_images(ims, row_num)
+
+
+def show_images(ims, row_num=6):
+    x = row_num
+    y = math.ceil(len(ims) / x)
+    f, axes = plt.subplots(y, x, sharey=True, figsize=np.array([x, y]) * 5)
+    print("Show Images")
+    for idx, im in enumerate(tqdm(ims)):
+        j = int(idx / x)
+        i = idx - j * x
+        if y <= 1:
+            axes[i].imshow(im)
+        else:
+            axes[j, i].imshow(im)
+
+    plt.tight_layout()
